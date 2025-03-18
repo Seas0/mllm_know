@@ -54,7 +54,7 @@ def vicrop_qa(model_name, method_name, image_path, question, model, processor, s
         general_prompt = f"<image>\nUSER: {general_question} Answer the question using a single word or phrase.\nASSISTANT:"
 
 
-        inputs = processor(prompt, image, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
+        inputs = processor(image, prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
         ori_generate_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         ori_generation = [i.split('ASSISTANT: ')[1] for i in processor.batch_decode(ori_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)][0]
 
@@ -63,7 +63,7 @@ def vicrop_qa(model_name, method_name, image_path, question, model, processor, s
 
         if method_name == 'grad_att':
             att_map = gradient_attention_llava(image, short_prompt, general_prompt, model, processor)
-            bbox = bbox_from_att_image_adaptive(att_map, image.size, bbox_size)
+            bbox = bbox_from_att_image_adaptive(att_map, image.size, bbox_size) 
         
         elif method_name == 'grad_att_high':
             att_maps = high_res(gradient_attention_llava, image, short_prompt, general_prompt, model, processor)
@@ -145,6 +145,52 @@ def vicrop_qa(model_name, method_name, image_path, question, model, processor, s
 
         return ori_generation, multi_generation, bbox
 
+
+def reweight_qa(model_name, method_name, image_path, question, model, processor, short_question):
+    """
+    Direct reweight based approach 
+    """
+
+    image = Image.open(image_path).convert("RGB")
+    model.eval()
+    general_question = 'Write a general description of the image.'
+
+    if model_name == "llava":
+        short_prompt = f"<image>\nUSER: {short_question} Answer the question using a single word or phrase.\nASSISTANT:"
+        general_prompt = f"<image>\nUSER: {general_question} Answer the question using a single word or phrase.\nASSISTANT:"
+        prompt = f"<image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
+
+        inputs = processor(image, prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
+        ori_generate_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+        ori_generation = [i.split('ASSISTANT: ')[1] for i in processor.batch_decode(ori_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)][0]
+
+        del inputs
+        torch.cuda.empty_cache()
+
+        att_map = rel_attention_llava(image, short_prompt, general_prompt, model, processor)
+        print(att_map.shape)
+        # breakpoint()
+        visual_token_weights = get_visual_token_weight(att_map, 0.6, "linear", 0.0)
+
+        multi_prompt = f"<image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
+        multi_inputs = processor(image, multi_prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
+        # print(multi_inputs.input_ids.shape)
+
+        multi_inputs_embeds = manual_embed_inputs(model, multi_inputs.input_ids, multi_inputs.pixel_values, visual_token_weights)
+
+        modified_inputs = {'inputs_embeds': multi_inputs_embeds, 'attention_mask': multi_inputs.attention_mask}
+        # print(multi_inputs_embeds.shape)
+
+        multi_generate_ids = model.generate(**modified_inputs, max_new_tokens=20, do_sample=False)
+        # print(processor.batch_decode(multi_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
+        multi_generation = processor.batch_decode(multi_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+
+        return ori_generation, multi_generation, None
+
+    elif model_name == "blip":
+        raise NotImplementedError("BLIP does not support reweighting")
+
+
 def main(args):
     """
     Main function to run the visual cropping and question answering pipeline.
@@ -201,7 +247,7 @@ def main(args):
         else:
             short_question = d["question"]
 
-        ori_generation, crop_generation, bbox = vicrop_qa(args.model, args.method, image_path, question, model, processor, short_question)
+        ori_generation, crop_generation, bbox = reweight_qa(args.model, args.method, image_path, question, model, processor, short_question)
 
         d["original_answer"] = ori_generation
         d["crop_answer"] = crop_generation

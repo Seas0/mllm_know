@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from skimage.measure import block_reduce
 from utils import *
+from typing import Literal
 
 # hyperparameters
 NUM_IMG_TOKENS = 576
@@ -12,6 +13,93 @@ PATCH_SIZE = 14
 IMAGE_RESOLUTION = 336
 IMAGE_TOKEN_INDEX = 32000
 ATT_LAYER = 14
+
+def get_visual_token_weight(
+    att_map,
+    threshold,
+    weighting_type: Literal["linear", "exp", "uniform"] | str = "linear",
+    lowest_weight=0.0,
+):
+    att_map = torch.from_numpy(att_map).flatten()
+    sorted_indices = torch.argsort(att_map, descending=True)
+    num_tokens_to_keep = int(len(att_map) * threshold)
+    weight_vision_token = torch.zeros_like(att_map, dtype=torch.float)
+    weight_vision_token[sorted_indices[:num_tokens_to_keep]] = 1.0
+    if weighting_type == "linear":
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.linspace(1.0, lowest_weight, len(att_map) - num_tokens_to_keep)
+    elif weighting_type == "exp":
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = torch.exp(torch.linspace(0, lowest_weight, len(sorted_indices) - num_tokens_to_keep))
+    elif weighting_type == "uniform":
+        weight_vision_token[sorted_indices[num_tokens_to_keep:]] = lowest_weight
+    else:
+        raise ValueError(f"Invalid weighting type: {weighting_type}")
+    return weight_vision_token
+
+
+def manual_embed_inputs(model, input_ids, pixel_values, vision_token_weights=None):
+    # Get input embeddings from the model
+    print(input_ids.shape)
+    print(pixel_values.shape)
+    print(vision_token_weights.shape)
+    inputs_embeds = model.get_input_embeddings()(input_ids)
+    
+    # Process image features
+    image_features = model.get_image_features(
+        pixel_values=pixel_values,
+        vision_feature_layer=model.config.vision_feature_layer,
+        vision_feature_select_strategy=model.config.vision_feature_select_strategy
+    )
+    
+    # Apply vision token weights if provided
+    if vision_token_weights is not None:
+        # Ensure weights are on the same device as image features
+        vision_token_weights = vision_token_weights.to(image_features.device)
+        # Apply weights to image features
+        image_features = image_features * vision_token_weights.unsqueeze(0).unsqueeze(-1)
+    
+    # Find image token positions
+    special_image_mask = (input_ids == model.config.image_token_index).unsqueeze(-1)
+    special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
+    print(special_image_mask.shape)
+    
+    # Replace image tokens with image features
+    image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+    inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+    
+    return inputs_embeds
+
+
+def simple_attention_llava(image, prompt, model, processor):
+    """
+    Simplest attention map from LLaVA model
+    """
+    inputs = processor(image, prompt, return_tensors="pt", padding=True).to(
+        model.device, torch.bfloat16
+    )
+    pos = inputs["input_ids"][0].tolist().index(IMAGE_TOKEN_INDEX)
+
+    all_layer_attn = model(**inputs, output_attentions=True)["attentions"]
+    att_map = (
+        torch.cat(
+            [
+                layer_attn[0, :, -1, pos : pos + NUM_IMG_TOKENS]
+                for layer_attn in all_layer_attn
+            ],
+            dim=0,
+        )
+        .mean(
+            dim=(
+                0,
+                1,
+            )
+        )
+        .to(torch.float32)
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    att_map = att_map.reshape(NUM_PATCHES, NUM_PATCHES)
+    return att_map
 
 def gradient_attention_llava(image, prompt, general_prompt, model, processor):
     """

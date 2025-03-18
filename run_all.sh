@@ -4,7 +4,7 @@ task=$1
 model=$2
 method=$3
 
-declare -a gpus=(0 1 2 3 4 5 6 7)
+declare -a gpus=(1 2 3)
 
 num_gpus=${#gpus[@]}
 
