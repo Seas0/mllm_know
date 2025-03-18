@@ -168,24 +168,36 @@ def reweight_qa(model_name, method_name, image_path, question, model, processor,
         torch.cuda.empty_cache()
 
         att_map = rel_attention_llava(image, short_prompt, general_prompt, model, processor)
-        print(att_map.shape)
+        # print(att_map.shape)
         # breakpoint()
         visual_token_weights = get_visual_token_weight(att_map, 0.6, "linear", 0.0)
 
-        multi_prompt = f"<image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
-        multi_inputs = processor(image, multi_prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
-        # print(multi_inputs.input_ids.shape)
+        if method_name == 'simple_reweight':
+            second_prompt = f"<image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
+            second_inputs = processor(image, second_prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
+            # print(multi_inputs.input_ids.shape)
 
-        multi_inputs_embeds = manual_embed_inputs(model, multi_inputs.input_ids, multi_inputs.pixel_values, visual_token_weights)
+            second_inputs_embeds = manual_embed_inputs(model, second_inputs.input_ids, second_inputs.pixel_values, visual_token_weights)
 
-        modified_inputs = {'inputs_embeds': multi_inputs_embeds, 'attention_mask': multi_inputs.attention_mask}
+            modified_inputs = {'inputs_embeds': second_inputs_embeds, 'attention_mask': second_inputs.attention_mask}
+        elif method_name == 'duplicate_reweight':
+            second_prompt = f"<image><image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
+            second_inputs = processor([image, image], second_prompt, return_tensors="pt", padding=True).to(model.device, torch.bfloat16)
+            # print(second_inputs.input_ids.shape)
+            # breakpoint()
+            # modified_inputs = None
+            second_inputs_embeds = manual_embed_inputs(model, second_inputs.input_ids, second_inputs.pixel_values, visual_token_weights)
+            modified_inputs = {'inputs_embeds': second_inputs_embeds, 'attention_mask': second_inputs.attention_mask}
+            
+        else:
+            raise ValueError(f"Method {method_name} not implemented")
         # print(multi_inputs_embeds.shape)
 
-        multi_generate_ids = model.generate(**modified_inputs, max_new_tokens=20, do_sample=False)
+        modified_generate_ids = model.generate(**modified_inputs, max_new_tokens=20, do_sample=False)
         # print(processor.batch_decode(multi_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False))
-        multi_generation = processor.batch_decode(multi_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        modified_generation = processor.batch_decode(modified_generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
-        return ori_generation, multi_generation, None
+        return ori_generation, modified_generation, None
 
     elif model_name == "blip":
         raise NotImplementedError("BLIP does not support reweighting")

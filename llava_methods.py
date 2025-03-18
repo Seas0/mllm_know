@@ -38,9 +38,9 @@ def get_visual_token_weight(
 
 def manual_embed_inputs(model, input_ids, pixel_values, vision_token_weights=None):
     # Get input embeddings from the model
-    print(input_ids.shape)
-    print(pixel_values.shape)
-    print(vision_token_weights.shape)
+    # print(input_ids.shape)
+    # print(pixel_values.shape)
+    # print(vision_token_weights.shape)
     inputs_embeds = model.get_input_embeddings()(input_ids)
     
     # Process image features
@@ -49,18 +49,21 @@ def manual_embed_inputs(model, input_ids, pixel_values, vision_token_weights=Non
         vision_feature_layer=model.config.vision_feature_layer,
         vision_feature_select_strategy=model.config.vision_feature_select_strategy
     )
-    
+    # Find image token positions
+    special_image_mask = (input_ids == model.config.image_token_index).unsqueeze(-1)
+    special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
+    # print(special_image_mask.shape)
+    # breakpoint()
     # Apply vision token weights if provided
     if vision_token_weights is not None:
         # Ensure weights are on the same device as image features
         vision_token_weights = vision_token_weights.to(image_features.device)
         # Apply weights to image features
-        image_features = image_features * vision_token_weights.unsqueeze(0).unsqueeze(-1)
-    
-    # Find image token positions
-    special_image_mask = (input_ids == model.config.image_token_index).unsqueeze(-1)
-    special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
-    print(special_image_mask.shape)
+        if image_features.shape[0] == 1:
+            image_features = image_features * vision_token_weights.unsqueeze(0).unsqueeze(-1)
+        else:
+            image_features[1:] = image_features[1:] * vision_token_weights.unsqueeze(0).unsqueeze(-1)
+
     
     # Replace image tokens with image features
     image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
