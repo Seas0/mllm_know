@@ -4,7 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from skimage.measure import block_reduce
 from utils import *
-from typing import Literal
+from typing import Literal, Sequence
 
 # hyperparameters
 NUM_IMG_TOKENS = 576
@@ -180,6 +180,43 @@ def rel_attention_llava(image, prompt, general_prompt, model, processor):
     att_map = att_map / general_att_map
 
     return att_map
+
+def contrastive_attention_llava(image, prompt, model, processor):
+    """
+    Generates a contrastive attention map by comparing different layers of attention maps of a same prompt.
+
+    This function computes attention maps for different layers of the same prompt in the LLaVA model,
+    then calculates their ratio to highlight regions that are uniquely relevant to the specific prompt.
+    """
+    LAYER_HIGH = 15
+    LAYER_LOW = 10
+    inputs = processor(prompt, image, return_tensors="pt", padding=True).to(
+        model.device, torch.bfloat16
+    )
+    pos = inputs["input_ids"][0].tolist().index(IMAGE_TOKEN_INDEX)
+
+    outputs = model(**inputs, output_attentions=True)
+    all_layer_attn: tuple[torch.Tensor, ...] = outputs["attentions"]
+    # NO n_decoded_tokens as not using generate method
+    # n_layers * [batch_size, n_heads, n_prompt_tokens|1, n_current_length]
+    # Attention Map For High and Low Layers
+    # high_attn = merge_decoding_attn_maps([a[LAYER_HIGH] for a in all_layer_attn])
+    # low_attn = merge_decoding_attn_maps([a[LAYER_LOW] for a in all_layer_attn])
+    high_attn = all_layer_attn[LAYER_HIGH].detach().float().cpu()
+    low_attn = all_layer_attn[LAYER_LOW].detach().float().cpu()
+    att_map_high = (
+        high_attn[0, :, -1, pos : pos + NUM_IMG_TOKENS]
+        .mean(dim=(0))
+        .reshape(NUM_PATCHES, NUM_PATCHES)
+    )
+    att_map_low = (
+        low_attn[0, :, -1, pos : pos + NUM_IMG_TOKENS]
+        .mean(dim=(0))
+        .reshape(NUM_PATCHES, NUM_PATCHES)
+    )
+    att_map = (att_map_high - att_map_low).numpy()
+    return att_map
+
 
 def pure_gradient_llava(image, prompt, general_prompt, model, processor):
     """
